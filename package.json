@@ -11,6 +11,7 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
+    "health:prod": "pnpm tsx src/services/health-check.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

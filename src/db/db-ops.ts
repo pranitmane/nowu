@@ -1,6 +1,7 @@
 import { and, desc, eq, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/neon-serverless";
-import { Pool, neonConfig } from "@neondatabase/serverless";
+import { drizzle as drizzleHttp } from "drizzle-orm/neon-http";
+import { Pool, neonConfig, neon } from "@neondatabase/serverless";
 import { postVersions, posts } from "./schema";
 
 // In Node.js (local dev), inject the ws package as the WebSocket implementation.
@@ -79,13 +80,13 @@ function getDb(): DrizzleDb {
   return sharedDb;
 }
 
-// Called by the CF Worker before any route runs to initialize the DB singleton
-// using the env binding rather than process.env. Idempotent — safe to call on
-// every request (returns immediately if already initialized).
+// Called by the CF Worker middleware on every request.
+// Uses neon-http (stateless fetch) — safe to reinitialize per request because
+// neon-http has no persistent connection. This avoids CF Workers' I/O isolation
+// error ("Cannot perform I/O on behalf of a different request") that occurs when
+// a WebSocket-backed Pool is cached from a previous request's context.
 export function initDb(connectionString: string): void {
-  if (sharedDb) return;
-  sharedPool = new Pool({ connectionString });
-  sharedDb = drizzle(sharedPool);
+  sharedDb = drizzleHttp(neon(connectionString)) as unknown as DrizzleDb;
 }
 
 export async function shutdownDatabasePool(): Promise<void> {
