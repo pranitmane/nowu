@@ -5,15 +5,24 @@ import {
   getLastDeletedPosts,
   getLastPosts,
   getPostByUid,
+  getPostsByDate,
   getPostTotals,
+  getSummaryByDate,
   insertNewPost,
   restorePost,
   softDeletePost,
   softDeletePostByUid,
   updatePostContent,
+  upsertSummary,
 } from "../db/db-ops";
+import { generateDailySummary } from "../services/summarize";
 
 type AllowedUserMap = Record<string, true>;
+
+type AiConfig = {
+  openrouterApiKey: string;
+  summaryModel: string;
+};
 
 function parseAllowedUsernames(raw: string): AllowedUserMap {
   const map: AllowedUserMap = {};
@@ -27,7 +36,7 @@ function parseAllowedUsernames(raw: string): AllowedUserMap {
   return map;
 }
 
-const KNOWN_COMMANDS = new Set(["delete", "which", "last", "restore", "trash", "stats"]);
+const KNOWN_COMMANDS = new Set(["delete", "which", "last", "restore", "trash", "stats", "summary"]);
 
 type ReferenceableMessage = {
   message_id: number;
@@ -166,7 +175,56 @@ async function sendMessage(
   } as Record<string, unknown>);
 }
 
-function attachMessageHandlers(bot: Telegraf, allowedUsers: AllowedUserMap): void {
+function parseSummaryDate(arg: string | null): string | null {
+  const IST_OFFSET_MS = 330 * 60 * 1000;
+  const istNow = new Date(Date.now() + IST_OFFSET_MS);
+  if (!arg || arg === "today" || arg === "0") {
+    return istNow.toISOString().slice(0, 10);
+  }
+  if (arg === "yesterday" || arg === "1") {
+    istNow.setUTCDate(istNow.getUTCDate() - 1);
+    return istNow.toISOString().slice(0, 10);
+  }
+  const n = parseInt(arg, 10);
+  if (!isNaN(n) && n >= 0 && String(n) === arg) {
+    istNow.setUTCDate(istNow.getUTCDate() - n);
+    return istNow.toISOString().slice(0, 10);
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(arg) && !isNaN(Date.parse(arg))) {
+    return arg;
+  }
+  return null;
+}
+
+function formatSummaryDate(dateStr: string): string {
+  const d = new Date(dateStr + "T00:00:00Z");
+  const day = d.getUTCDate().toString().padStart(2, "0");
+  const month = (d.getUTCMonth() + 1).toString().padStart(2, "0");
+  const year = d.getUTCFullYear().toString().slice(2);
+  return `${day}/${month}/${year}`;
+}
+
+function formatIstTimestamp(date: Date): string {
+  const IST_OFFSET_MS = 330 * 60 * 1000;
+  const ist = new Date(date.getTime() + IST_OFFSET_MS);
+  const day = ist.getUTCDate().toString().padStart(2, "0");
+  const month = (ist.getUTCMonth() + 1).toString().padStart(2, "0");
+  const year = ist.getUTCFullYear().toString().slice(2);
+  const hours = ist.getUTCHours().toString().padStart(2, "0");
+  const minutes = ist.getUTCMinutes().toString().padStart(2, "0");
+  return `${day}/${month}/${year} ${hours}:${minutes}`;
+}
+
+function formatSummaryFooter(generatedAt: Date, summaryDate: string, model: string): string {
+  return `-- ${formatIstTimestamp(generatedAt)} | summary for ${formatSummaryDate(summaryDate)} via ${model}`;
+}
+
+function getTodayIst(): string {
+  const IST_OFFSET_MS = 330 * 60 * 1000;
+  return new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+function attachMessageHandlers(bot: Telegraf, allowedUsers: AllowedUserMap, aiConfig?: AiConfig): void {
   bot.on("message", async (ctx) => {
     if (!isUserAllowed(ctx, allowedUsers)) {
       console.warn(
@@ -292,6 +350,74 @@ function attachMessageHandlers(bot: Telegraf, allowedUsers: AllowedUserMap): voi
           return;
         }
 
+        if (commandName === "summary") {
+          if (!aiConfig) {
+            response = "error | AI summarization is not configured";
+            await sendMessage(ctx, chatId, incomingMessage.message_id, response);
+            return;
+          }
+
+          let forceRegen = false;
+          let rawArg = commandArg;
+          if (commandArg?.startsWith("regen")) {
+            forceRegen = true;
+            rawArg = commandArg.slice("regen".length).trim() || null;
+          }
+
+          const dateStr = parseSummaryDate(rawArg);
+          if (!dateStr) {
+            response = "error | invalid date. Use: today, 0, 1, 2, yesterday, YYYY-MM-DD, or regen <date>";
+            await sendMessage(ctx, chatId, incomingMessage.message_id, response);
+            return;
+          }
+
+          if (dateStr > getTodayIst()) {
+            response = "error | date is in the future";
+            await sendMessage(ctx, chatId, incomingMessage.message_id, response);
+            return;
+          }
+
+          if (!forceRegen) {
+            const cached = await getSummaryByDate(dateStr);
+            if (cached) {
+              response = `${cached.content}\n${formatSummaryFooter(cached.generatedAt, dateStr, cached.model)}`;
+              await sendMessage(ctx, chatId, incomingMessage.message_id, response);
+              return;
+            }
+          }
+
+          const prevDate = new Date(dateStr + "T00:00:00Z");
+          prevDate.setUTCDate(prevDate.getUTCDate() - 1);
+          const prevSummary = await getSummaryByDate(prevDate.toISOString().slice(0, 10));
+
+          const dayPosts = await getPostsByDate(dateStr);
+          if (dayPosts.length === 0) {
+            response = `no posts found for ${dateStr}`;
+            await sendMessage(ctx, chatId, incomingMessage.message_id, response);
+            return;
+          }
+
+          const content = await generateDailySummary(
+            dayPosts,
+            aiConfig.openrouterApiKey,
+            aiConfig.summaryModel,
+            prevSummary?.content
+          );
+
+          const generatedAt = new Date();
+          await upsertSummary({
+            date: dateStr,
+            content,
+            postsCount: dayPosts.length,
+            model: aiConfig.summaryModel,
+            generatedAt,
+          });
+
+          response = `${content}\n${formatSummaryFooter(generatedAt, dateStr, aiConfig.summaryModel)}`;
+          await sendMessage(ctx, chatId, incomingMessage.message_id, response);
+          return;
+        }
+
         if (commandName === "trash") {
           const n = commandArg ? Math.min(parseInt(commandArg, 10) || 1, 10) : 1;
           const deletedPosts = await getLastDeletedPosts(n);
@@ -371,10 +497,10 @@ function attachMessageHandlers(bot: Telegraf, allowedUsers: AllowedUserMap): voi
 // For production (CF Workers webhook mode): create a configured bot instance
 // without starting long polling. The caller is responsible for calling
 // bot.handleUpdate(update) per incoming Telegram update.
-export function createBot(token: string, allowedUsernamesStr: string): Telegraf {
+export function createBot(token: string, allowedUsernamesStr: string, aiConfig?: AiConfig): Telegraf {
   const allowedUsers = parseAllowedUsernames(allowedUsernamesStr);
   const bot = new Telegraf(token);
-  attachMessageHandlers(bot, allowedUsers);
+  attachMessageHandlers(bot, allowedUsers, aiConfig);
   return bot;
 }
 
@@ -388,8 +514,14 @@ export async function startLoggingBot(): Promise<void> {
   }
 
   const allowedUsers = parseAllowedUsernames(process.env.ALLOWED_USERNAMES ?? "");
+  const aiConfig = process.env.OPENROUTER_API_KEY
+    ? {
+        openrouterApiKey: process.env.OPENROUTER_API_KEY,
+        summaryModel: process.env.SUMMARY_MODEL ?? "google/gemini-2.0-flash-001",
+      }
+    : undefined;
   const bot = new Telegraf(botToken);
-  attachMessageHandlers(bot, allowedUsers);
+  attachMessageHandlers(bot, allowedUsers, aiConfig);
 
   await bot.launch();
   console.log("Telegraf bot is running (long polling). Press Ctrl+C to stop.");

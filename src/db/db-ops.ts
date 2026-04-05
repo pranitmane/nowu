@@ -1,8 +1,7 @@
-import { and, desc, eq, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/neon-serverless";
-import { drizzle as drizzleHttp } from "drizzle-orm/neon-http";
-import { Pool, neonConfig, neon } from "@neondatabase/serverless";
-import { postVersions, posts } from "./schema";
+import { Pool, neonConfig } from "@neondatabase/serverless";
+import { postVersions, posts, summaries } from "./schema";
 
 // In Node.js (local dev), inject the ws package as the WebSocket implementation.
 // In CF Workers, globalThis.WebSocket is natively available so this block is skipped.
@@ -49,6 +48,16 @@ type PostTotals = {
   deleted: number;
 };
 
+export type SummaryRecord = typeof summaries.$inferSelect;
+
+type UpsertSummaryParams = {
+  date: string;
+  content: string;
+  postsCount: number;
+  model: string;
+  generatedAt: Date;
+};
+
 type PaginatedPosts = {
   posts: PostRecord[];
   nextCursor: number | null;
@@ -81,12 +90,13 @@ function getDb(): DrizzleDb {
 }
 
 // Called by the CF Worker middleware on every request.
-// Uses neon-http (stateless fetch) — safe to reinitialize per request because
-// neon-http has no persistent connection. This avoids CF Workers' I/O isolation
-// error ("Cannot perform I/O on behalf of a different request") that occurs when
-// a WebSocket-backed Pool is cached from a previous request's context.
+// Creates a fresh Pool per request — no caching. This avoids CF Workers'
+// I/O isolation error ("Cannot perform I/O on behalf of a different request")
+// that occurs when a WebSocket-backed Pool is cached from request A's context
+// and reused in request B. The Neon pooler handles actual DB connection pooling.
 export function initDb(connectionString: string): void {
-  sharedDb = drizzleHttp(neon(connectionString)) as unknown as DrizzleDb;
+  sharedPool = new Pool({ connectionString });
+  sharedDb = drizzle(sharedPool);
 }
 
 export async function shutdownDatabasePool(): Promise<void> {
@@ -425,6 +435,57 @@ export async function getAllEditsByUid(
   };
 
   return [currentVersion, ...versions];
+}
+
+export async function getPostsByDate(dateStr: string): Promise<PostRecord[]> {
+  const db = getDb();
+  // IST is UTC+5:30 (330 minutes). An IST calendar day runs from 18:30 UTC (prev day)
+  // to 18:30 UTC (same day), so we query that range instead of a UTC date boundary.
+  return db
+    .select()
+    .from(posts)
+    .where(
+      and(
+        eq(posts.deleted, false),
+        sql`${posts.createdAt} >= ${dateStr}::date - INTERVAL '330 minutes'`,
+        sql`${posts.createdAt} < ${dateStr}::date + INTERVAL '1 day' - INTERVAL '330 minutes'`
+      )
+    )
+    .orderBy(asc(posts.createdAt));
+}
+
+export async function getSummaryByDate(dateStr: string): Promise<SummaryRecord | null> {
+  const db = getDb();
+  const [row] = await db
+    .select()
+    .from(summaries)
+    .where(eq(summaries.date, dateStr))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function upsertSummary(params: UpsertSummaryParams): Promise<SummaryRecord> {
+  const db = getDb();
+  const [row] = await db
+    .insert(summaries)
+    .values({
+      date: params.date,
+      content: params.content,
+      postsCount: params.postsCount,
+      model: params.model,
+      generatedAt: params.generatedAt,
+    })
+    .onConflictDoUpdate({
+      target: summaries.date,
+      set: {
+        content: params.content,
+        postsCount: params.postsCount,
+        model: params.model,
+        generatedAt: params.generatedAt,
+      },
+    })
+    .returning();
+  return row;
 }
 
 export async function getPostTotals(): Promise<PostTotals> {

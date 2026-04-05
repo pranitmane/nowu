@@ -8,12 +8,16 @@ import {
   getDeletedPostsPaginated,
   getLastPosts,
   getPostByUid,
+  getPostsByDate,
   getPostTotals,
+  getSummaryByDate,
   insertNewPost,
   restorePost,
   softDeletePostByUid,
   updatePostContentByUid,
+  upsertSummary,
 } from "../db/db-ops";
+import { generateDailySummary } from "../services/summarize";
 
 const app = new Hono();
 
@@ -148,6 +152,73 @@ app.post("/posts/:uid/restore", async (c) => {
     return c.json({ error: "post not found" }, 404);
   }
   return c.json(post);
+});
+
+function getTodayIst(): string {
+  const IST_OFFSET_MS = 330 * 60 * 1000;
+  return new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+function isValidDateStr(s: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(Date.parse(s));
+}
+
+async function buildAndGenerateSummary(dateParam: string, apiKey: string, model: string) {
+  const prevDate = new Date(dateParam + "T00:00:00Z");
+  prevDate.setUTCDate(prevDate.getUTCDate() - 1);
+  const prevDateStr = prevDate.toISOString().slice(0, 10);
+  const prevSummary = await getSummaryByDate(prevDateStr);
+
+  const dayPosts = await getPostsByDate(dateParam);
+  if (dayPosts.length === 0) return null;
+
+  const content = await generateDailySummary(dayPosts, apiKey, model, prevSummary?.content);
+  return upsertSummary({ date: dateParam, content, postsCount: dayPosts.length, model, generatedAt: new Date() });
+}
+
+// GET /ai/summary?date=YYYY-MM-DD
+app.get("/ai/summary", async (c) => {
+  const dateParam = c.req.query("date");
+  if (!dateParam || !isValidDateStr(dateParam)) {
+    return c.json({ error: "date query param required (YYYY-MM-DD)" }, 400);
+  }
+  if (dateParam > getTodayIst()) {
+    return c.json({ error: "date is in the future" }, 400);
+  }
+
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  const model = process.env.SUMMARY_MODEL ?? "google/gemini-2.0-flash-001";
+  if (!apiKey) {
+    return c.json({ error: "OPENROUTER_API_KEY is not configured" }, 500);
+  }
+
+  const cached = await getSummaryByDate(dateParam);
+  if (cached) return c.json(cached);
+
+  const summary = await buildAndGenerateSummary(dateParam, apiKey, model);
+  if (!summary) return c.json({ error: `no posts found for ${dateParam}` }, 404);
+  return c.json(summary);
+});
+
+// POST /ai/summary?date=YYYY-MM-DD — force regenerate for any date
+app.post("/ai/summary", async (c) => {
+  const dateParam = c.req.query("date");
+  if (!dateParam || !isValidDateStr(dateParam)) {
+    return c.json({ error: "date query param required (YYYY-MM-DD)" }, 400);
+  }
+  if (dateParam > getTodayIst()) {
+    return c.json({ error: "date is in the future" }, 400);
+  }
+
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  const model = process.env.SUMMARY_MODEL ?? "google/gemini-2.0-flash-001";
+  if (!apiKey) {
+    return c.json({ error: "OPENROUTER_API_KEY is not configured" }, 500);
+  }
+
+  const summary = await buildAndGenerateSummary(dateParam, apiKey, model);
+  if (!summary) return c.json({ error: `no posts found for ${dateParam}` }, 404);
+  return c.json(summary);
 });
 
 const port = parseInt(process.env.PORT ?? "3000", 10);

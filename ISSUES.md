@@ -12,7 +12,8 @@ Known operational issues, their root causes, and exact fix steps.
 - **Root cause:** `sharedDb` singleton in `db-ops.ts` caches the Neon DB connection from the first request. CF Workers enforces I/O isolation — any I/O object (stream, connection) created in request A's context cannot be reused by request B. The module-level singleton violates this rule.
 - **Fix:** In `worker.ts`, call `initDb()` without caching: create a fresh `drizzle(neon(connectionString))` instance on every request. Since `neon-http` is stateless (pure fetch, no persistent WebSocket), this is cheap and safe.
   Change `initDb` in `db-ops.ts` to not guard with `if (sharedDb) return` when running in CF Workers. The simplest fix is to reinitialize on every request in the worker middleware.
-- **Status:** open
+- **Fix (applied 2026-03-29):** Changed `initDb` in `db-ops.ts` to create a fresh `Pool` on every CF Workers request without caching (`if (sharedDb) return` guard removed). The Neon pooler handles actual DB connection pooling. Node.js path (`getDb()`) is unaffected.
+- **Status:** resolved
 
 ---
 

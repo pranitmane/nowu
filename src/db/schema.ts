@@ -2,6 +2,7 @@ import {
   bigserial,
   bigint,
   boolean,
+  date,
   integer,
   pgEnum,
   pgTable,
@@ -46,6 +47,15 @@ export const postVersions = pgTable(
     ),
   })
 );
+
+export const summaries = pgTable("summaries", {
+  id: bigserial("id", { mode: "number" }).primaryKey(),
+  date: date("date").notNull().unique(),
+  content: text("content").notNull(),
+  postsCount: integer("posts_count").notNull(),
+  model: text("model").notNull(),
+  generatedAt: timestamp("generated_at", { withTimezone: true }).notNull(),
+});
 
 export const postsRelations = relations(posts, ({ many }) => ({
   versions: many(postVersions),

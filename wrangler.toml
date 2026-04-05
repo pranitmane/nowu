@@ -6,3 +6,6 @@ compatibility_flags = ["nodejs_compat"]
 routes = [
   { pattern = "api.pranitmane.com", custom_domain = true }
 ]
+
+[triggers]
+crons = ["30 18 * * *"]
