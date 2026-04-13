@@ -1,3 +1,4 @@
+//note for agents -- any changes made to this file should reflect in the worker.ts file as well, since both serve the same API but in different environments (Node server vs Cloudflare Worker)
 import "dotenv/config";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
@@ -91,19 +92,24 @@ app.get("/posts/:uid/edits", async (c) => {
   return c.json({ edits });
 });
 
-// POST /posts — create a new post (CLI origin)
+const ALLOWED_API_ORIGINS = ["cli", "web"] as const;
+type ApiOrigin = (typeof ALLOWED_API_ORIGINS)[number];
+
+// POST /posts — create a new post (CLI origin by default; pass origin:"web" for web clients)
 app.post("/posts", async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body || typeof body.content !== "string" || !body.content.trim()) {
     return c.json({ error: "content is required" }, 400);
   }
 
+  const origin: ApiOrigin = ALLOWED_API_ORIGINS.includes(body.origin) ? body.origin : "cli";
+
   const uid = nanoid(10);
   const post = await insertNewPost({
     uid,
     content: body.content.trim(),
     timestamp: new Date(),
-    origin: "cli",
+    origin,
   });
 
   if (!post) {

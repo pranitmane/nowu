@@ -1,0 +1,1 @@
+ALTER TYPE "public"."origin_type" ADD VALUE 'web';

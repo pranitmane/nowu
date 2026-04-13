@@ -118,18 +118,22 @@ app.get("/posts/:uid/edits", async (c) => {
   return c.json({ edits });
 });
 
+const ALLOWED_API_ORIGINS = ["cli", "web"] as const;
+type ApiOrigin = (typeof ALLOWED_API_ORIGINS)[number];
+
 // POST /posts
 app.post("/posts", async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body || typeof body.content !== "string" || !body.content.trim()) {
     return c.json({ error: "content is required" }, 400);
   }
+  const origin: ApiOrigin = ALLOWED_API_ORIGINS.includes(body.origin) ? body.origin : "cli";
   const uid = nanoid(10);
   const post = await insertNewPost({
     uid,
     content: body.content.trim(),
     timestamp: new Date(),
-    origin: "cli",
+    origin,
   });
   if (!post) return c.json({ error: "failed to insert post" }, 500);
   return c.json(post, 201);

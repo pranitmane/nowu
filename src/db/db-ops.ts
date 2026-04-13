@@ -20,7 +20,7 @@ type InsertPostParams = {
   authorTelegramId?: number;
   content: string;
   timestamp: Date;
-  origin?: "tg" | "cli";
+  origin?: "tg" | "cli" | "web";
 };
 
 type UpdatePostParams = {
