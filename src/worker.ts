@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { nanoid } from "nanoid";
 import { createBot } from "./bot/bot-core";
 import {
@@ -30,6 +31,17 @@ type Env = {
 };
 
 const app = new Hono<{ Bindings: Env }>();
+
+const ALLOWED_ORIGINS = [
+  "https://nowu.pranitmane.com",
+  "http://localhost:3000",
+];
+
+app.use("*", cors({
+  origin: (origin) => ALLOWED_ORIGINS.includes(origin) ? origin : "",
+  allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  allowHeaders: ["Authorization", "Content-Type"],
+}));
 
 // Initialize DB singleton on first request using the CF env binding.
 // initDb() is idempotent — subsequent calls return immediately.

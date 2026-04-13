@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { nanoid } from "nanoid";
 import {
   getAllEditsByUid,
@@ -21,6 +22,17 @@ import {
 import { generateDailySummary } from "../services/summarize";
 
 const app = new Hono();
+
+const ALLOWED_ORIGINS = [
+  "https://nowu.pranitmane.com",
+  ...(process.env.NODE_ENV !== "production" ? ["http://localhost:3000"] : []),
+];
+
+app.use("*", cors({
+  origin: (origin) => ALLOWED_ORIGINS.includes(origin) ? origin : "",
+  allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  allowHeaders: ["Authorization", "Content-Type"],
+}));
 
 // Auth middleware — all routes require a valid Bearer token
 app.use("*", async (c, next) => {
